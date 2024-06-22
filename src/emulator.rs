@@ -1,10 +1,10 @@
+use crate::{display::Display, font};
+use rand::Rng;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
-use std::time::{Duration, Instant, SystemTime};
-
-use crate::{display::Display, font};
+use std::time::{Duration, Instant};
 
 struct Emulator {
     memory: [u8; 4096],
@@ -15,6 +15,31 @@ struct Emulator {
     delay_timer: u8,
     sound_timer: u8,
     registers: [u8; 16],
+}
+
+#[derive(Debug)]
+struct Instruction {
+    raw_instruction: u16,
+    first_opcode: u16,
+    x: usize,
+    y: usize,
+    n: u8,
+    nn: u8,
+    nnn: u16,
+}
+
+impl Instruction {
+    fn new(raw_instruction: u16) -> Self {
+        Instruction {
+            raw_instruction,
+            first_opcode: raw_instruction & 0xF000 as u16,
+            x: ((raw_instruction & 0x0F00) >> 8) as usize,
+            y: ((raw_instruction & 0x00F0) >> 4) as usize,
+            n: (raw_instruction & 0x000F) as u8,
+            nn: (raw_instruction & 0x00FF) as u8,
+            nnn: raw_instruction & 0x0FFF,
+        }
+    }
 }
 
 impl Emulator {
@@ -41,71 +66,158 @@ impl Emulator {
         let instruction_msb =
             (*self.memory.get(self.program_counter as usize).unwrap() as u16) << 8;
         let instruction_lsb = *self.memory.get(self.program_counter as usize + 1).unwrap() as u16;
-        let instruction = instruction_msb | instruction_lsb;
+        let raw_instruction = instruction_msb | instruction_lsb;
 
         // Increment program counter
         self.program_counter += 2;
 
-        // Decode
-        let first_opcode = instruction & 0xF000;
+        // Decode & Execute
+        let instruction = Instruction::new(raw_instruction);
+        self.execute_instruction(instruction);
+    }
 
-        let x = ((instruction & 0x0F00) >> 8) as u8;
-        let y = ((instruction & 0x00F0) >> 4) as u8;
-        let n = (instruction & 0x000F) as u8;
-        let nn = (instruction & 0x00FF) as u8;
-        let nnn = instruction & 0x0FFF;
-
+    fn execute_instruction(&mut self, instruction: Instruction) {
         // Execute
-        match instruction {
+        match instruction.raw_instruction {
             0x00E0 => self.display.clear(),
-            _ => match first_opcode {
-                0x1000 => self.program_counter = nnn,
-                0x6000 => self.registers[x as usize] = nn,
-                0x7000 => self.registers[x as usize] += nn,
-                0xA000 => self.index_register = nnn,
-                0xD000 => {
-                    let x_pos = self.registers[x as usize] % 64;
-                    let y_pos = self.registers[y as usize] % 32;
-
-                    let start = self.index_register as usize;
-                    let end = start + n as usize;
-                    let bytes = if let Some(slice) = self.memory.get(start..end) {
-                        slice.to_vec()
-                    } else {
-                        vec![]
-                    };
-
-                    self.registers[0xF] = 0;
-
-                    for (pos, &byte) in bytes.iter().enumerate() {
-                        let draw_y_pos = (y_pos + pos as u8) as usize;
-                        if draw_y_pos >= 32 {
-                            break;
-                        }
-
-                        for i in 0..8 {
-                            if (byte >> (7 - i)) & 0x01 == 0 {
-                                continue;
-                            }
-
-                            let draw_x_pos = (x_pos + i) as usize;
-
-                            if draw_x_pos >= 64 {
-                                break;
-                            }
-
-                            if self.display.buffer[draw_y_pos][draw_x_pos] {
-                                self.registers[0xF] = 1;
-                            }
-
-                            self.display.buffer[draw_y_pos][draw_x_pos] ^= true;
-                            self.display.draw = true;
-
-                        }
+            0x00EE => {
+                self.program_counter = self.stack.pop().expect("No value to pop off the stack")
+            }
+            _ => match instruction.first_opcode {
+                0x1000 => self.program_counter = instruction.nnn,
+                0x2000 => {
+                    self.stack.push(self.program_counter);
+                    self.program_counter = instruction.nnn;
+                }
+                0x3000 => {
+                    if self.registers[instruction.x] == instruction.nn {
+                        self.program_counter += 2;
                     }
                 }
-                _ => panic!("Unimplemented instruction {:x}", instruction),
+                0x4000 => {
+                    if self.registers[instruction.x] != instruction.nn {
+                        self.program_counter += 2;
+                    }
+                }
+                0x5000 => {
+                    if self.registers[instruction.x] == self.registers[instruction.y] {
+                        self.program_counter += 2;
+                    }
+                }
+                0x6000 => self.registers[instruction.x] = instruction.nn,
+                0x7000 => self.registers[instruction.x] += instruction.nn,
+                0x8000 => {
+                    let x_register = self.registers[instruction.x];
+                    let y_register = self.registers[instruction.y];
+                    self.registers[instruction.x] = match instruction.n {
+                        0x0 => y_register,
+                        0x1 => x_register | y_register,
+                        0x2 => x_register & y_register,
+                        0x3 => x_register ^ y_register,
+                        0x4 => {
+                            let (result, overflow) = x_register.overflowing_add(y_register);
+                            if overflow {
+                                self.registers[0xF] = 1;
+                            }
+                            result
+                        }
+                        0x5 => {
+                            let (result, underflow) = x_register.overflowing_sub(y_register);
+                            if underflow {
+                                self.registers[0xF] = 0;
+                            } else {
+                                self.registers[0xF] = 1;
+                            }
+                            result
+                        }
+                        0x6 => {
+                            if x_register & (0x1 << 7) == 1 {
+                                // VF = 1 iff the bit shifted was 1
+                                self.registers[0xF] = 1;
+                            } else {
+                                self.registers[0xF] = 0;
+                            }
+                            x_register << 1
+                        }
+                        0x7 => {
+                            let (result, underflow) = y_register.overflowing_sub(x_register);
+                            if underflow {
+                                self.registers[0xF] = 0;
+                            } else {
+                                self.registers[0xF] = 1;
+                            }
+                            result
+                        }
+                        0x8 => {
+                            if x_register & 0x1 == 1 {
+                                // VF = 1 iff the bit shifted was 1
+                                self.registers[0xF] = 1;
+                            } else {
+                                self.registers[0xF] = 0;
+                            }
+                            x_register >> 1
+                        }
+                        _ => panic!("Invalid instruction {}", instruction.raw_instruction),
+                    }
+                }
+                0x9000 => {
+                    if self.registers[instruction.x] != self.registers[instruction.y] {
+                        self.program_counter += 2;
+                    }
+                }
+                0xA000 => self.index_register = instruction.nnn,
+                0xB000 => self.program_counter = instruction.nnn + self.registers[0x0] as u16,
+                0xC000 => self.registers[instruction.x] = rand::thread_rng().gen::<u8>() & instruction.nn,
+                0xD000 => self.execute_draw_instruction(&instruction),
+                _ => panic!(
+                    "Unimplemented instruction {:x}",
+                    instruction.raw_instruction
+                ),
             },
+        }
+    }
+
+    fn execute_draw_instruction(&mut self, instruction: &Instruction) {
+        let x_pos = self.registers[instruction.x] % 64;
+        let y_pos = self.registers[instruction.y] % 32;
+
+        let start = self.index_register as usize;
+        let end = start + instruction.n as usize;
+        let bytes = if let Some(slice) = self.memory.get(start..end) {
+            slice.to_vec()
+        } else {
+            panic!(
+                "Bad draw instruction (memory not found) {}",
+                instruction.raw_instruction
+            );
+        };
+
+        self.registers[0xF] = 0;
+
+        for (pos, &byte) in bytes.iter().enumerate() {
+            let draw_y_pos = (y_pos + pos as u8) as usize;
+            if draw_y_pos >= 32 {
+                break;
+            }
+
+            for i in 0..8 {
+                if (byte >> (7 - i)) & 0x01 == 0 {
+                    continue;
+                }
+
+                let draw_x_pos = (x_pos + i) as usize;
+
+                if draw_x_pos >= 64 {
+                    break;
+                }
+
+                if self.display.buffer[draw_y_pos][draw_x_pos] {
+                    self.registers[0xF] = 1;
+                }
+
+                self.display.buffer[draw_y_pos][draw_x_pos] ^= true;
+                self.display.draw = true;
+            }
         }
     }
 }
