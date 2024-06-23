@@ -1,15 +1,15 @@
 use sdl2::keyboard::Keycode;
 
 pub struct Controller {
-    pub pressed: Option<u8>,
-    pub released: Option<u8>,
+    pressed: [bool; 16],
+    pub last_pressed: Option<u8>, // last key pressed that is still pressed. will not go back to keys previously pressed (chip-8 hardware not this advanced).
 }
 
 impl Default for Controller {
     fn default() -> Self {
         Controller {
-            pressed: None,
-            released: None,
+            pressed: [false; 16],
+            last_pressed: None,
         }
     }
 }
@@ -20,7 +20,7 @@ impl Controller {
     }
 
     // TODO: support various mappings
-    pub fn map_to_hex(&self, key: Keycode) -> Option<u8> {
+    fn map_to_hex(&self, key: Keycode) -> Option<u8> {
         match key {
             Keycode::NUM_1 => Some(0x1),
             Keycode::NUM_2 => Some(0x2),
@@ -40,5 +40,29 @@ impl Controller {
             Keycode::V => Some(0xF),
             _ => None,
         }
+    }
+
+    pub fn press_key(&mut self, key: Keycode) {
+        if let Some(hex) = self.map_to_hex(key) {
+            self.pressed[hex as usize] = true;
+            self.last_pressed = Some(hex);
+        }
+    }
+
+    pub fn release_key(&mut self, key: Keycode) {
+        if let Some(hex) = self.map_to_hex(key) {
+            self.pressed[hex as usize] = false;
+            if Some(hex) == self.last_pressed {
+                self.last_pressed = None;
+            }
+        }
+    }
+
+    pub fn is_key_pressed(&self, key: u8) -> bool {
+        if key > 15 {
+            return false;
+        }
+
+        self.pressed[key as usize]
     }
 }

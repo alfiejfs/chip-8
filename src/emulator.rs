@@ -76,10 +76,6 @@ impl Emulator {
 
         // Decode & Execute
         let instruction = Instruction::new(raw_instruction);
-        println!(
-            "Running instruction {:x} (delay timer = {})",
-            instruction.raw_instruction, self.delay_timer
-        );
         self.execute_instruction(instruction);
     }
 
@@ -181,23 +177,25 @@ impl Emulator {
                     self.registers[instruction.x] = rand::thread_rng().gen::<u8>() & instruction.nn
                 }
                 0xD000 => self.execute_draw_instruction(&instruction),
-                0xE000 => {
-                    if let Some(key) = self.controller.pressed {
-                        match instruction.nn {
-                            0x9E => {
-                                if key == self.registers[instruction.x] {
-                                    self.program_counter += 2
-                                }
-                            }
-                            0xA1 => {
-                                if key != self.registers[instruction.x] {
-                                    self.program_counter += 2
-                                }
-                            }
-                            _ => panic!("Invalid instruction {:x}", instruction.raw_instruction),
+                0xE000 => match instruction.nn {
+                    0x9E => {
+                        if self
+                            .controller
+                            .is_key_pressed(self.registers[instruction.x])
+                        {
+                            self.program_counter += 2
                         }
                     }
-                }
+                    0xA1 => {
+                        if !self
+                            .controller
+                            .is_key_pressed(self.registers[instruction.x])
+                        {
+                            self.program_counter += 2
+                        }
+                    }
+                    _ => panic!("Invalid instruction {:x}", instruction.raw_instruction),
+                },
                 0xF000 => match instruction.nn {
                     0x07 => self.registers[instruction.x] = self.delay_timer,
                     0x15 => self.delay_timer = self.registers[instruction.x],
@@ -213,7 +211,7 @@ impl Emulator {
                         self.index_register = result % 0x0FFF;
                     }
                     0x0A => {
-                        if let Some(key) = self.controller.pressed {
+                        if let Some(key) = self.controller.last_pressed {
                             self.registers[instruction.x] = key;
                         } else {
                             self.program_counter -= 2;
@@ -251,9 +249,6 @@ impl Emulator {
                 ),
             },
         }
-
-        // cleaning up the released buffer
-        self.controller.released = None;
     }
 
     fn execute_draw_instruction(&mut self, instruction: &Instruction) {
@@ -351,20 +346,10 @@ pub fn emulate(program: Vec<u8>) {
                 } => break 'running,
                 Event::KeyDown {
                     keycode: Some(key), ..
-                } => {
-                    if emulator.controller.pressed.is_none() {
-                        emulator.controller.pressed = emulator.controller.map_to_hex(key);
-                    }
-                }
+                } => emulator.controller.press_key(key),
                 Event::KeyUp {
                     keycode: Some(key), ..
-                } => {
-                    let hex = emulator.controller.map_to_hex(key);
-                    if hex == emulator.controller.pressed {
-                        emulator.controller.pressed = None;
-                        emulator.controller.released = hex;
-                    }
-                }
+                } => emulator.controller.release_key(key),
                 _ => {}
             }
         }

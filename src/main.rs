@@ -9,7 +9,7 @@ mod font;
 fn main() {
     let mut path = env::current_dir().expect("path");
     path.push("programs");
-    path.push("danm8ku.ch8");
+    path.push("flightrunner.ch8");
 
     let program = fs::read(path).unwrap();
 
