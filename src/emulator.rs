@@ -1,4 +1,4 @@
-use crate::{display::Display, font};
+use crate::{controller::Controller, display::Display, font};
 use rand::Rng;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -15,6 +15,7 @@ struct Emulator {
     delay_timer: u8,
     sound_timer: u8,
     registers: [u8; 16],
+    controller: Controller,
 }
 
 #[derive(Debug)]
@@ -46,7 +47,8 @@ impl Emulator {
     fn new(program: Vec<u8>) -> Self {
         let mut memory = [0; 4096];
 
-        memory[80..80 + font::FONT.len()].copy_from_slice(&font::FONT);
+        memory[font::FONT_OFFSET..font::FONT_OFFSET + font::FONT.len()]
+            .copy_from_slice(&font::FONT);
         memory[512..512 + program.len()].copy_from_slice(&program);
 
         Self {
@@ -58,6 +60,7 @@ impl Emulator {
             delay_timer: 0,
             sound_timer: 0,
             registers: [0; 16],
+            controller: Controller::new(),
         }
     }
 
@@ -73,6 +76,10 @@ impl Emulator {
 
         // Decode & Execute
         let instruction = Instruction::new(raw_instruction);
+        println!(
+            "Running instruction {:x} (delay timer = {})",
+            instruction.raw_instruction, self.delay_timer
+        );
         self.execute_instruction(instruction);
     }
 
@@ -105,59 +112,62 @@ impl Emulator {
                     }
                 }
                 0x6000 => self.registers[instruction.x] = instruction.nn,
-                0x7000 => self.registers[instruction.x] += instruction.nn,
+                0x7000 => {
+                    self.registers[instruction.x] =
+                        self.registers[instruction.x].wrapping_add(instruction.nn)
+                }
                 0x8000 => {
                     let x_register = self.registers[instruction.x];
                     let y_register = self.registers[instruction.y];
-                    self.registers[instruction.x] = match instruction.n {
-                        0x0 => y_register,
-                        0x1 => x_register | y_register,
-                        0x2 => x_register & y_register,
-                        0x3 => x_register ^ y_register,
+                    let (result, f_register) = match instruction.n {
+                        0x0 => (y_register, None),
+                        0x1 => (x_register | y_register, None),
+                        0x2 => (x_register & y_register, None),
+                        0x3 => (x_register ^ y_register, None),
                         0x4 => {
                             let (result, overflow) = x_register.overflowing_add(y_register);
                             if overflow {
-                                self.registers[0xF] = 1;
+                                (result, Some(1))
+                            } else {
+                                (result, Some(0))
                             }
-                            result
                         }
                         0x5 => {
                             let (result, underflow) = x_register.overflowing_sub(y_register);
                             if underflow {
-                                self.registers[0xF] = 0;
+                                (result, Some(0))
                             } else {
-                                self.registers[0xF] = 1;
+                                (result, Some(1))
                             }
-                            result
                         }
                         0x6 => {
-                            if x_register & (0x1 << 7) == 1 {
-                                // VF = 1 iff the bit shifted was 1
-                                self.registers[0xF] = 1;
+                            if (x_register & 1) == 1 {
+                                (x_register >> 1, Some(1))
                             } else {
-                                self.registers[0xF] = 0;
+                                (x_register >> 1, Some(0))
                             }
-                            x_register << 1
                         }
                         0x7 => {
                             let (result, underflow) = y_register.overflowing_sub(x_register);
                             if underflow {
-                                self.registers[0xF] = 0;
+                                (result, Some(0))
                             } else {
-                                self.registers[0xF] = 1;
+                                (result, Some(1))
                             }
-                            result
                         }
-                        0x8 => {
-                            if x_register & 0x1 == 1 {
-                                // VF = 1 iff the bit shifted was 1
-                                self.registers[0xF] = 1;
+                        0xE => {
+                            if (x_register & (1 << 7)) != 0 {
+                                (x_register << 1, Some(1))
                             } else {
-                                self.registers[0xF] = 0;
+                                (x_register << 1, Some(0))
                             }
-                            x_register >> 1
                         }
-                        _ => panic!("Invalid instruction {}", instruction.raw_instruction),
+                        _ => panic!("Invalid instruction {:x}", instruction.raw_instruction),
+                    };
+
+                    self.registers[instruction.x] = result;
+                    if let Some(f_register) = f_register {
+                        self.registers[0xF] = f_register;
                     }
                 }
                 0x9000 => {
@@ -167,14 +177,83 @@ impl Emulator {
                 }
                 0xA000 => self.index_register = instruction.nnn,
                 0xB000 => self.program_counter = instruction.nnn + self.registers[0x0] as u16,
-                0xC000 => self.registers[instruction.x] = rand::thread_rng().gen::<u8>() & instruction.nn,
+                0xC000 => {
+                    self.registers[instruction.x] = rand::thread_rng().gen::<u8>() & instruction.nn
+                }
                 0xD000 => self.execute_draw_instruction(&instruction),
+                0xE000 => {
+                    if let Some(key) = self.controller.pressed {
+                        match instruction.nn {
+                            0x9E => {
+                                if key == self.registers[instruction.x] {
+                                    self.program_counter += 2
+                                }
+                            }
+                            0xA1 => {
+                                if key != self.registers[instruction.x] {
+                                    self.program_counter += 2
+                                }
+                            }
+                            _ => panic!("Invalid instruction {:x}", instruction.raw_instruction),
+                        }
+                    }
+                }
+                0xF000 => match instruction.nn {
+                    0x07 => self.registers[instruction.x] = self.delay_timer,
+                    0x15 => self.delay_timer = self.registers[instruction.x],
+                    0x18 => self.sound_timer = self.registers[instruction.x],
+                    0x1E => {
+                        let (result, overflow) = self
+                            .index_register
+                            .overflowing_add(self.registers[instruction.x].into());
+                        if overflow || result > 0x0FFF {
+                            self.registers[0xF] = 1;
+                        }
+
+                        self.index_register = result % 0x0FFF;
+                    }
+                    0x0A => {
+                        if let Some(key) = self.controller.pressed {
+                            self.registers[instruction.x] = key;
+                        } else {
+                            self.program_counter -= 2;
+                        }
+                    }
+                    0x29 => {
+                        self.index_register = (font::FONT_OFFSET as u8
+                            + (self.registers[instruction.x] & 0x0F))
+                            .into();
+                    }
+                    0x33 => {
+                        let mut x_register = self.registers[instruction.x];
+                        for i in (0..=2).rev() {
+                            self.memory[(self.index_register + i) as usize] = x_register % 10;
+                            x_register /= 10;
+                        }
+                    }
+                    0x55 => {
+                        for i in 0..=instruction.x {
+                            self.memory[(self.index_register + i as u16) as usize] =
+                                self.registers[i];
+                        }
+                    }
+                    0x65 => {
+                        for i in 0..=instruction.x {
+                            self.registers[i] =
+                                self.memory[(self.index_register + i as u16) as usize];
+                        }
+                    }
+                    _ => panic!("Invalid instruction {:x}", instruction.raw_instruction),
+                },
                 _ => panic!(
                     "Unimplemented instruction {:x}",
                     instruction.raw_instruction
                 ),
             },
         }
+
+        // cleaning up the released buffer
+        self.controller.released = None;
     }
 
     fn execute_draw_instruction(&mut self, instruction: &Instruction) {
@@ -270,6 +349,22 @@ pub fn emulate(program: Vec<u8>) {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(key), ..
+                } => {
+                    if emulator.controller.pressed.is_none() {
+                        emulator.controller.pressed = emulator.controller.map_to_hex(key);
+                    }
+                }
+                Event::KeyUp {
+                    keycode: Some(key), ..
+                } => {
+                    let hex = emulator.controller.map_to_hex(key);
+                    if hex == emulator.controller.pressed {
+                        emulator.controller.pressed = None;
+                        emulator.controller.released = hex;
+                    }
+                }
                 _ => {}
             }
         }
@@ -314,7 +409,5 @@ pub fn emulate(program: Vec<u8>) {
 
             last_instruction_time = Instant::now();
         }
-
-        ::std::thread::sleep(Duration::from_millis(1));
     }
 }

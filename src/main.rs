@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 
+mod controller;
 mod display;
 mod emulator;
 mod font;
@@ -8,7 +9,7 @@ mod font;
 fn main() {
     let mut path = env::current_dir().expect("path");
     path.push("programs");
-    path.push("ibm.ch8");
+    path.push("danm8ku.ch8");
 
     let program = fs::read(path).unwrap();
 
