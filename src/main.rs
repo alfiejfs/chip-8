@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 
 mod controller;
+mod decoder;
 mod display;
 mod emulator;
 mod font;
@@ -9,7 +10,7 @@ mod font;
 fn main() {
     let mut path = env::current_dir().expect("path");
     path.push("programs");
-    path.push("flightrunner.ch8");
+    path.push("c8_test.ch8");
 
     let program = fs::read(path).unwrap();
 

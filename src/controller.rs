@@ -59,10 +59,6 @@ impl Controller {
     }
 
     pub fn is_key_pressed(&self, key: u8) -> bool {
-        if key > 15 {
-            return false;
-        }
-
-        self.pressed[key as usize]
+        *self.pressed.get(key as usize).unwrap_or(&false)
     }
 }

@@ -1,4 +1,7 @@
-use crate::{controller::Controller, display::Display, font};
+use crate::{
+    controller::Controller, decoder::Instruction, decoder::ParsedInstruction, display::Display,
+    font,
+};
 use rand::Rng;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -16,31 +19,6 @@ struct Emulator {
     sound_timer: u8,
     registers: [u8; 16],
     controller: Controller,
-}
-
-#[derive(Debug)]
-struct Instruction {
-    raw_instruction: u16,
-    first_opcode: u16,
-    x: usize,
-    y: usize,
-    n: u8,
-    nn: u8,
-    nnn: u16,
-}
-
-impl Instruction {
-    fn new(raw_instruction: u16) -> Self {
-        Instruction {
-            raw_instruction,
-            first_opcode: raw_instruction & 0xF000 as u16,
-            x: ((raw_instruction & 0x0F00) >> 8) as usize,
-            y: ((raw_instruction & 0x00F0) >> 4) as usize,
-            n: (raw_instruction & 0x000F) as u8,
-            nn: (raw_instruction & 0x00FF) as u8,
-            nnn: raw_instruction & 0x0FFF,
-        }
-    }
 }
 
 impl Emulator {
@@ -75,194 +53,191 @@ impl Emulator {
         self.program_counter += 2;
 
         // Decode & Execute
-        let instruction = Instruction::new(raw_instruction);
+        let instruction = ParsedInstruction::parse(raw_instruction);
         self.execute_instruction(instruction);
     }
 
-    fn execute_instruction(&mut self, instruction: Instruction) {
-        // Execute
-        match instruction.raw_instruction {
-            0x00E0 => self.display.clear(),
-            0x00EE => {
+    fn execute_instruction(&mut self, parsed_instruction: ParsedInstruction) {
+        match parsed_instruction.instruction {
+            Instruction::Clear => self.display.clear(),
+            Instruction::PopStack => {
                 self.program_counter = self.stack.pop().expect("No value to pop off the stack")
             }
-            _ => match instruction.first_opcode {
-                0x1000 => self.program_counter = instruction.nnn,
-                0x2000 => {
-                    self.stack.push(self.program_counter);
-                    self.program_counter = instruction.nnn;
+            Instruction::SetProgramCounter => self.program_counter = parsed_instruction.nnn,
+            Instruction::PushStackSetProgramCounter => {
+                self.stack.push(self.program_counter);
+                self.program_counter = parsed_instruction.nnn;
+            }
+            Instruction::SkipIfEqualImmediate => {
+                if self.registers[parsed_instruction.x] == parsed_instruction.nn {
+                    self.program_counter += 2;
                 }
-                0x3000 => {
-                    if self.registers[instruction.x] == instruction.nn {
-                        self.program_counter += 2;
-                    }
+            }
+            Instruction::SkipIfNotEqualImmediate => {
+                if self.registers[parsed_instruction.x] != parsed_instruction.nn {
+                    self.program_counter += 2;
                 }
-                0x4000 => {
-                    if self.registers[instruction.x] != instruction.nn {
-                        self.program_counter += 2;
-                    }
+            }
+            Instruction::SkipIfEqualRegister => {
+                if self.registers[parsed_instruction.x] == self.registers[parsed_instruction.y] {
+                    self.program_counter += 2;
                 }
-                0x5000 => {
-                    if self.registers[instruction.x] == self.registers[instruction.y] {
-                        self.program_counter += 2;
-                    }
+            }
+            Instruction::SetRegister => {
+                self.registers[parsed_instruction.x] = parsed_instruction.nn
+            }
+            Instruction::AddToRegister => {
+                self.registers[parsed_instruction.x] =
+                    self.registers[parsed_instruction.x].wrapping_add(parsed_instruction.nn)
+            }
+            Instruction::CopyFromRegisterToRegister => {
+                self.registers[parsed_instruction.x] = self.registers[parsed_instruction.y]
+            }
+            Instruction::LogicalOr => {
+                self.registers[parsed_instruction.x] =
+                    self.registers[parsed_instruction.x] | self.registers[parsed_instruction.y]
+            }
+            Instruction::LogicalAnd => {
+                self.registers[parsed_instruction.x] =
+                    self.registers[parsed_instruction.x] & self.registers[parsed_instruction.y]
+            }
+            Instruction::LogicalXor => {
+                self.registers[parsed_instruction.x] =
+                    self.registers[parsed_instruction.x] ^ self.registers[parsed_instruction.y]
+            }
+            Instruction::Addition => {
+                let (result, overflow) = self.registers[parsed_instruction.x]
+                    .overflowing_add(self.registers[parsed_instruction.y]);
+                self.registers[parsed_instruction.x] = result;
+                if overflow {
+                    self.registers[0xF] = 1;
+                } else {
+                    self.registers[0xF] = 0;
                 }
-                0x6000 => self.registers[instruction.x] = instruction.nn,
-                0x7000 => {
-                    self.registers[instruction.x] =
-                        self.registers[instruction.x].wrapping_add(instruction.nn)
+            }
+            Instruction::Subtraction => {
+                let (result, underflow) = self.registers[parsed_instruction.x]
+                    .overflowing_sub(self.registers[parsed_instruction.y]);
+                self.registers[parsed_instruction.x] = result;
+                if underflow {
+                    self.registers[0xF] = 0;
+                } else {
+                    self.registers[0xF] = 1;
                 }
-                0x8000 => {
-                    let x_register = self.registers[instruction.x];
-                    let y_register = self.registers[instruction.y];
-                    let (result, f_register) = match instruction.n {
-                        0x0 => (y_register, None),
-                        0x1 => (x_register | y_register, None),
-                        0x2 => (x_register & y_register, None),
-                        0x3 => (x_register ^ y_register, None),
-                        0x4 => {
-                            let (result, overflow) = x_register.overflowing_add(y_register);
-                            if overflow {
-                                (result, Some(1))
-                            } else {
-                                (result, Some(0))
-                            }
-                        }
-                        0x5 => {
-                            let (result, underflow) = x_register.overflowing_sub(y_register);
-                            if underflow {
-                                (result, Some(0))
-                            } else {
-                                (result, Some(1))
-                            }
-                        }
-                        0x6 => {
-                            if (x_register & 1) == 1 {
-                                (x_register >> 1, Some(1))
-                            } else {
-                                (x_register >> 1, Some(0))
-                            }
-                        }
-                        0x7 => {
-                            let (result, underflow) = y_register.overflowing_sub(x_register);
-                            if underflow {
-                                (result, Some(0))
-                            } else {
-                                (result, Some(1))
-                            }
-                        }
-                        0xE => {
-                            if (x_register & (1 << 7)) != 0 {
-                                (x_register << 1, Some(1))
-                            } else {
-                                (x_register << 1, Some(0))
-                            }
-                        }
-                        _ => panic!("Invalid instruction {:x}", instruction.raw_instruction),
-                    };
+            }
+            Instruction::RightShift => {
+                let (result, overflow) = (
+                    self.registers[parsed_instruction.x] >> 1,
+                    self.registers[parsed_instruction.x] & 1,
+                );
+                self.registers[parsed_instruction.x] = result;
+                self.registers[0xF] = overflow;
+            }
+            Instruction::FlippedSubtraction => {
+                let (result, underflow) = self.registers[parsed_instruction.y]
+                    .overflowing_sub(self.registers[parsed_instruction.x]);
+                self.registers[parsed_instruction.x] = result;
+                if underflow {
+                    self.registers[0xF] = 0;
+                } else {
+                    self.registers[0xF] = 1;
+                }
+            }
+            Instruction::LeftShift => {
+                let (result, overflow) = (
+                    self.registers[parsed_instruction.x] << 1,
+                    self.registers[parsed_instruction.x] & (1 << 7),
+                );
+                self.registers[parsed_instruction.x] = result;
+                self.registers[0xF] = overflow >> 7;
+            }
+            Instruction::SkipIfNotEqualRegister => {
+                if self.registers[parsed_instruction.x] != self.registers[parsed_instruction.y] {
+                    self.program_counter += 2;
+                }
+            }
+            Instruction::SetIndexRegister => self.index_register = parsed_instruction.nnn,
+            Instruction::SetProgramCounterOffset => {
+                self.program_counter = parsed_instruction.nnn + self.registers[0x0] as u16
+            }
+            Instruction::RandomNumber => {
+                self.registers[parsed_instruction.x] =
+                    rand::thread_rng().gen::<u8>() & parsed_instruction.nn
+            }
+            Instruction::Draw => self.execute_draw_instruction(&parsed_instruction),
+            Instruction::KeyDown => {
+                if self
+                    .controller
+                    .is_key_pressed(self.registers[parsed_instruction.x])
+                {
+                    self.program_counter += 2
+                }
+            }
+            Instruction::KeyNotDown => {
+                if !self
+                    .controller
+                    .is_key_pressed(self.registers[parsed_instruction.x])
+                {
+                    self.program_counter += 2
+                }
+            }
+            Instruction::CopyDelayTimer => self.registers[parsed_instruction.x] = self.delay_timer,
+            Instruction::SetDelayTimer => self.delay_timer = self.registers[parsed_instruction.x],
+            Instruction::SetSoundTimer => self.sound_timer = self.registers[parsed_instruction.x],
+            Instruction::AddToIndexRegister => {
+                let (result, overflow) = self
+                    .index_register
+                    .overflowing_add(self.registers[parsed_instruction.x].into());
+                if overflow || result > 0x0FFF {
+                    self.registers[0xF] = 1;
+                }
 
-                    self.registers[instruction.x] = result;
-                    if let Some(f_register) = f_register {
-                        self.registers[0xF] = f_register;
-                    }
+                self.index_register = result % 0x0FFF;
+            }
+            Instruction::WaitForKeyPress => {
+                if let Some(key) = self.controller.last_pressed {
+                    self.registers[parsed_instruction.x] = key;
+                } else {
+                    self.program_counter -= 2;
                 }
-                0x9000 => {
-                    if self.registers[instruction.x] != self.registers[instruction.y] {
-                        self.program_counter += 2;
-                    }
+            }
+            Instruction::SetIndexRegisterToFontCharacter => {
+                self.index_register = (font::FONT_OFFSET as u8
+                    + (self.registers[parsed_instruction.x] & 0x0F))
+                    .into();
+            }
+            Instruction::ConvertToDecimal => {
+                let mut x_register = self.registers[parsed_instruction.x];
+                for i in (0..=2).rev() {
+                    self.memory[(self.index_register + i) as usize] = x_register % 10;
+                    x_register /= 10;
                 }
-                0xA000 => self.index_register = instruction.nnn,
-                0xB000 => self.program_counter = instruction.nnn + self.registers[0x0] as u16,
-                0xC000 => {
-                    self.registers[instruction.x] = rand::thread_rng().gen::<u8>() & instruction.nn
+            }
+            Instruction::WriteToMemory => {
+                for i in 0..=parsed_instruction.x {
+                    self.memory[(self.index_register + i as u16) as usize] = self.registers[i];
                 }
-                0xD000 => self.execute_draw_instruction(&instruction),
-                0xE000 => match instruction.nn {
-                    0x9E => {
-                        if self
-                            .controller
-                            .is_key_pressed(self.registers[instruction.x])
-                        {
-                            self.program_counter += 2
-                        }
-                    }
-                    0xA1 => {
-                        if !self
-                            .controller
-                            .is_key_pressed(self.registers[instruction.x])
-                        {
-                            self.program_counter += 2
-                        }
-                    }
-                    _ => panic!("Invalid instruction {:x}", instruction.raw_instruction),
-                },
-                0xF000 => match instruction.nn {
-                    0x07 => self.registers[instruction.x] = self.delay_timer,
-                    0x15 => self.delay_timer = self.registers[instruction.x],
-                    0x18 => self.sound_timer = self.registers[instruction.x],
-                    0x1E => {
-                        let (result, overflow) = self
-                            .index_register
-                            .overflowing_add(self.registers[instruction.x].into());
-                        if overflow || result > 0x0FFF {
-                            self.registers[0xF] = 1;
-                        }
-
-                        self.index_register = result % 0x0FFF;
-                    }
-                    0x0A => {
-                        if let Some(key) = self.controller.last_pressed {
-                            self.registers[instruction.x] = key;
-                        } else {
-                            self.program_counter -= 2;
-                        }
-                    }
-                    0x29 => {
-                        self.index_register = (font::FONT_OFFSET as u8
-                            + (self.registers[instruction.x] & 0x0F))
-                            .into();
-                    }
-                    0x33 => {
-                        let mut x_register = self.registers[instruction.x];
-                        for i in (0..=2).rev() {
-                            self.memory[(self.index_register + i) as usize] = x_register % 10;
-                            x_register /= 10;
-                        }
-                    }
-                    0x55 => {
-                        for i in 0..=instruction.x {
-                            self.memory[(self.index_register + i as u16) as usize] =
-                                self.registers[i];
-                        }
-                    }
-                    0x65 => {
-                        for i in 0..=instruction.x {
-                            self.registers[i] =
-                                self.memory[(self.index_register + i as u16) as usize];
-                        }
-                    }
-                    _ => panic!("Invalid instruction {:x}", instruction.raw_instruction),
-                },
-                _ => panic!(
-                    "Unimplemented instruction {:x}",
-                    instruction.raw_instruction
-                ),
-            },
+            }
+            Instruction::ReadFromMemory => {
+                for i in 0..=parsed_instruction.x {
+                    self.registers[i] = self.memory[(self.index_register + i as u16) as usize];
+                }
+            }
         }
     }
 
-    fn execute_draw_instruction(&mut self, instruction: &Instruction) {
-        let x_pos = self.registers[instruction.x] % 64;
-        let y_pos = self.registers[instruction.y] % 32;
+    fn execute_draw_instruction(&mut self, parsed_instruction: &ParsedInstruction) {
+        let x_pos = self.registers[parsed_instruction.x] % 64;
+        let y_pos = self.registers[parsed_instruction.y] % 32;
 
         let start = self.index_register as usize;
-        let end = start + instruction.n as usize;
+        let end = start + parsed_instruction.n as usize;
         let bytes = if let Some(slice) = self.memory.get(start..end) {
             slice.to_vec()
         } else {
             panic!(
                 "Bad draw instruction (memory not found) {}",
-                instruction.raw_instruction
+                parsed_instruction.raw_instruction
             );
         };
 
@@ -355,14 +330,14 @@ pub fn emulate(program: Vec<u8>) {
         }
 
         // Check if it's time to execute the next instruction
-        if last_instruction_time.elapsed() >= Duration::from_millis(1_000 / 700) {
+        if last_instruction_time.elapsed() >= Duration::from_millis(1) {
             emulator.perform_fde_cycle();
 
             // Rerender if necessary
             if emulator.display.draw {
-                canvas.set_draw_color(Color::BLACK);
+                canvas.set_draw_color(Color::BLUE);
                 canvas.clear();
-                canvas.set_draw_color(Color::WHITE);
+                canvas.set_draw_color(Color::YELLOW);
 
                 emulator
                     .display
