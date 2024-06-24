@@ -95,15 +95,18 @@ impl Emulator {
             }
             Instruction::LogicalOr => {
                 self.registers[parsed_instruction.x] =
-                    self.registers[parsed_instruction.x] | self.registers[parsed_instruction.y]
+                    self.registers[parsed_instruction.x] | self.registers[parsed_instruction.y];
+                self.registers[0xF] = 0;
             }
             Instruction::LogicalAnd => {
                 self.registers[parsed_instruction.x] =
-                    self.registers[parsed_instruction.x] & self.registers[parsed_instruction.y]
+                    self.registers[parsed_instruction.x] & self.registers[parsed_instruction.y];
+                self.registers[0xF] = 0;
             }
             Instruction::LogicalXor => {
                 self.registers[parsed_instruction.x] =
-                    self.registers[parsed_instruction.x] ^ self.registers[parsed_instruction.y]
+                    self.registers[parsed_instruction.x] ^ self.registers[parsed_instruction.y];
+                self.registers[0xF] = 0;
             }
             Instruction::Addition => {
                 let (result, overflow) = self.registers[parsed_instruction.x]
@@ -125,14 +128,6 @@ impl Emulator {
                     self.registers[0xF] = 1;
                 }
             }
-            Instruction::RightShift => {
-                let (result, overflow) = (
-                    self.registers[parsed_instruction.x] >> 1,
-                    self.registers[parsed_instruction.x] & 1,
-                );
-                self.registers[parsed_instruction.x] = result;
-                self.registers[0xF] = overflow;
-            }
             Instruction::FlippedSubtraction => {
                 let (result, underflow) = self.registers[parsed_instruction.y]
                     .overflowing_sub(self.registers[parsed_instruction.x]);
@@ -145,11 +140,19 @@ impl Emulator {
             }
             Instruction::LeftShift => {
                 let (result, overflow) = (
-                    self.registers[parsed_instruction.x] << 1,
-                    self.registers[parsed_instruction.x] & (1 << 7),
+                    self.registers[parsed_instruction.y] << 1,
+                    self.registers[parsed_instruction.y] & (1 << 7),
                 );
                 self.registers[parsed_instruction.x] = result;
                 self.registers[0xF] = overflow >> 7;
+            }
+            Instruction::RightShift => {
+                let (result, overflow) = (
+                    self.registers[parsed_instruction.y] >> 1,
+                    self.registers[parsed_instruction.y] & 1,
+                );
+                self.registers[parsed_instruction.x] = result;
+                self.registers[0xF] = overflow;
             }
             Instruction::SkipIfNotEqualRegister => {
                 if self.registers[parsed_instruction.x] != self.registers[parsed_instruction.y] {
@@ -217,11 +220,13 @@ impl Emulator {
                 for i in 0..=parsed_instruction.x {
                     self.memory[(self.index_register + i as u16) as usize] = self.registers[i];
                 }
+                self.index_register += 1 + parsed_instruction.x as u16;
             }
             Instruction::ReadFromMemory => {
                 for i in 0..=parsed_instruction.x {
                     self.registers[i] = self.memory[(self.index_register + i as u16) as usize];
                 }
+                self.index_register += 1 + parsed_instruction.x as u16;
             }
         }
     }
@@ -330,7 +335,7 @@ pub fn emulate(program: Vec<u8>) {
         }
 
         // Check if it's time to execute the next instruction
-        if last_instruction_time.elapsed() >= Duration::from_millis(1) {
+        if last_instruction_time.elapsed() >= Duration::from_micros(25) {
             emulator.perform_fde_cycle();
 
             // Rerender if necessary
